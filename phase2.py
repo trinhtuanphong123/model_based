@@ -32,6 +32,9 @@ class HostAgent:
         base_demand: float,
         base_occupancy: float,
         local_kappa: float,
+        demand_to_hkd: float,      # NEW: unit converter from Phase 1
+
+
     ):
         self.agent_id = str(agent_id)
         self.district = district
@@ -55,6 +58,12 @@ class HostAgent:
         self.reaction_history = [0.0]
         self.bounds_history = [0.0]
         self.noise_history = [0.0]
+        
+        self.base_demand_raw = float(base_demand)
+        self.base_demand = float(base_demand * demand_to_hkd)  # HKD units
+        self.demand = self.base_demand
+        self.demand_to_hkd = float(demand_to_hkd)
+
 
     def update_state(
         self,
@@ -207,29 +216,31 @@ class HongKongEnvironment:
         # 1) Spatial diffusion (coarse-grained approximation)
         P_lag = self.approximate_district_spatial_lag(P)
         diff_raw = P_lag - P
-        diff_raw = np.clip(diff_raw, -500, 500)
-
+        # diff_raw = np.clip(diff_raw, -500, 500)
+        p_range = self.p_max_vec - self.p_min_vec
+        diff_raw = np.clip(diff_raw, -p_range, p_range)
         diffusion = self.D_diff * diff_raw
 
         # 2) Demand reaction
         # reaction = self.alpha * (D_new - self.kappa * P)
         
         raw_reaction = D_new - self.kappa_vec * P
-
-        # 🔥 clamp để tránh shock phá hệ
-        raw_reaction = np.clip(raw_reaction, -1e3, 1e3)
+        reaction_cap = 5.0 * np.mean(p_range)
+        raw_reaction = np.clip(raw_reaction, -reaction_cap, reaction_cap)
 
         reaction = self.alpha * raw_reaction
         # 3) Logistic bounding
         bound_force = P * (P - self.p_min_vec) * (P - self.p_max_vec)
         bound_force = np.clip(bound_force, -1e9, 1e9)
         bounds = -self.beta * bound_force
-        bounds = np.clip(bounds, -100, 100)
+        bounds = np.clip(bounds, -np.mean(p_range), np.mean(p_range))
+
 
         # 4) Stochastic noise
         
-        noise_scale = 0.3  # 🔥 giảm noise xuống mức kiểm soát
-        noise = noise_scale * self.sigma_vec * np.random.normal(0.0, 1.0, size=len(self.agents)) * np.sqrt(self.dt)
+        # noise_scale = 0.3  # 🔥 giảm noise xuống mức kiểm soát
+        # noise = noise_scale * self.sigma_vec * np.random.normal(0.0, 1.0, size=len(self.agents)) * np.sqrt(self.dt)
+        noise = self.sigma_vec * np.random.normal(0.0, 1.0, size=len(self.agents)) * np.sqrt(self.dt)
 
         # 5) Euler step
         dP = (diffusion + reaction + bounds) * self.dt + noise
@@ -248,10 +259,23 @@ class HongKongEnvironment:
 
         self.step_count += 1
         if self.step_count % 10 == 0:
-            print(f"[Step {self.step_count}] "
-                f"mean|diff|={np.mean(np.abs(diffusion)):.2f}, "
-                f"mean|react|={np.mean(np.abs(reaction)):.2f}, "
-                f"mean|noise|={np.mean(np.abs(noise)):.2f}")
+            mean_diff   = float(np.mean(np.abs(diffusion)))
+            mean_react  = float(np.mean(np.abs(reaction)))
+            mean_noise  = float(np.mean(np.abs(noise)))
+
+            ratio_rn = mean_react / (mean_noise + 1e-8)
+            ratio_dn = mean_diff  / (mean_noise + 1e-8)
+
+            hierarchy_ok = (ratio_rn >= 2.0) and (ratio_dn >= 0.1)
+            flag = "✓" if hierarchy_ok else "⚠ HIERARCHY VIOLATION"
+
+            print(
+                f"[Step {self.step_count:>4}] "
+                f"|diff|={mean_diff:7.2f}  "
+                f"|react|={mean_react:7.2f}  "
+                f"|noise|={mean_noise:7.2f}  "
+                f"R/N={ratio_rn:.2f}  D/N={ratio_dn:.2f}  {flag}"
+            )
 
 class ABMSimulator:
     """
@@ -305,10 +329,11 @@ class ABMSimulator:
                 f"Some listing districts are missing from the weight matrix: {missing_districts}"
             )
 
-        for key in ["kappa", "alpha", "D_diff"]:
+     
+        
+        for key in ["kappa", "alpha", "D_diff", "demand_to_hkd"]:
             if key not in self.params:
                 raise ValueError(f"Missing required parameter in params.json: '{key}'")
-
     def _initialize_agents(self):
         for _, row in self.df.iterrows():
             agent = HostAgent(
@@ -321,6 +346,7 @@ class ABMSimulator:
                 base_demand=float(row["monthly_bookings_proxy"]),
                 base_occupancy=float(row["occupancy_rate"]),
                 local_kappa=float(row["local_kappa"]),   # 🔥 THIẾU CÁI NÀY TRƯỚC ĐÓ
+                demand_to_hkd=demand_to_hkd,   # NEW
             )
             self.agents.append(agent)
 

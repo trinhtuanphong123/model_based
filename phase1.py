@@ -468,7 +468,13 @@ W_norm = np.divide(W, row_sums, out=np.zeros_like(W), where=(row_sums != 0))
 weight_df = pd.DataFrame(W_norm, index=districts, columns=districts)
 weight_df.to_csv(OUTPUT_WEIGHTS_PATH)
 print(f"  ✓ Saved spatial weights -> {OUTPUT_WEIGHTS_PATH}")
+  
 
+mean_price_global = float(df["price"].mean())
+mean_demand_global = float(df["monthly_bookings_proxy"].replace(0, np.nan).mean())
+mean_demand_global = max(mean_demand_global, 1e-6)
+
+demand_to_hkd = mean_price_global / mean_demand_global
 # 8d. PDE parameters κ, α, D_diff, σ, p_min, p_max
 # 8d. PDE parameters κ, α, D_diff, σ, p_min, p_max
 print("  [8d] Estimating localized PDE parameters ...")
@@ -499,6 +505,39 @@ df = df.merge(
     on="neighbourhood_cleansed",
     how="left",
 )
+ # TARGET REACTION MAGNITUDE (per listing, at t=0 with small perturbation)
+# We use a 10% demand perturbation as the reference signal.
+# This is NOT the equilibrium point — it is the response to a small nudge.
+
+perturbation_fraction = 0.10
+target_reaction_per_listing = (
+    alpha
+    * perturbation_fraction
+    * mean_demand_global
+    * demand_to_hkd
+)
+target_reaction_per_listing = max(target_reaction_per_listing, 1.0)
+
+# NOISE TARGET: 10% of reaction magnitude
+# noise = noise_scale * sigma * N(0,1) * sqrt(dt)
+# Expected |noise| ≈ noise_scale * sigma * sqrt(2/pi) * sqrt(dt)
+# Solving for sigma:
+
+NOISE_TO_REACTION_RATIO = 0.10
+noise_scale = 1.0  # fixed at 1.0 — no more free parameter
+sqrt_dt = np.sqrt(0.05)
+expected_noise_unit = noise_scale * sqrt_dt * np.sqrt(2 / np.pi)
+
+target_sigma_global = (
+    NOISE_TO_REACTION_RATIO * target_reaction_per_listing / expected_noise_unit
+)
+
+# Apply per-district with relative scaling from price std
+district_stats["local_sigma"] = (
+    target_sigma_global
+    * (district_stats["median_price"] / median_price_mean)
+).clip(lower=0.5)
+
 
 global_sigma = float(df["price"].std() * 0.1)
 if not np.isfinite(global_sigma) or global_sigma <= 0:
@@ -517,6 +556,7 @@ median_price_mean = float(district_stats["median_price"].mean())
 mean_demand_mean = float(district_stats["mean_demand"].mean())
 
 median_price_mean = max(median_price_mean, 1e-6)
+
 
 # ─────────────────────────────────────────
 # 4. GLOBAL κ (giữ để đảm bảo tính vật lý)
@@ -544,7 +584,12 @@ D_diff = np.clip(abs(morans_i) * 0.05, 0.01, 0.10)
 # ─────────────────────────────────────────
 # Không được set alpha quá lớn
 # alpha = np.clip(1.0 / median_price_mean, 1e-4, 5e-3)
-alpha = 0.5
+# Target: a 10% demand shock should move price by ~1% of median per dt
+target_delta_P = 0.01 * median_price_mean   # HKD per step
+reference_D_kappa_P = perturbation_fraction * mean_demand_global * demand_to_hkd
+
+alpha = target_delta_P / (reference_D_kappa_P * 0.05)  # divide by dt
+alpha = float(np.clip(alpha, 0.01, 5.0))
 # ─────────────────────────────────────────
 # 7. Demand sensitivity
 # ─────────────────────────────────────────
@@ -563,6 +608,44 @@ df["local_kappa"] = (
     .fillna(kappa)   # fallback về global → giữ consistency
 )
 
+
+# TARGET EQUILIBRIUM: district median price (not individual listing price)
+# Each listing's kappa is calibrated to the district center,
+# so listings above the median have downward pull,
+# listings below the median have upward pull.
+# This creates natural market mean-reversion without explosive divergence.
+
+district_equilibrium = district_stats.set_index(
+    "neighbourhood_cleansed"
+)["median_price"]
+
+df["district_equilibrium_price"] = df["neighbourhood_cleansed"].map(
+    district_equilibrium
+)
+
+# kappa_i = D_i_base_converted / P_equilibrium_i
+# where D_i_base_converted is demand in HKD units
+df["demand_hkd"] = df["monthly_bookings_proxy"] * demand_to_hkd
+
+df["local_kappa"] = (
+    df["demand_hkd"] * np.exp(-gamma * df["district_equilibrium_price"])
+    / df["district_equilibrium_price"]
+)
+
+# Fallback: global kappa computed the same way
+kappa_global = (
+    mean_demand_global * demand_to_hkd
+    * np.exp(-gamma * median_price_mean)
+    / median_price_mean
+)
+
+df["local_kappa"] = (
+    df["local_kappa"]
+    .replace([np.inf, -np.inf], np.nan)
+    .fillna(kappa_global)
+    .clip(lower=1e-6)
+)  
+
 # ─────────────────────────────────────────
 # 9. Global bounds
 # ─────────────────────────────────────────
@@ -573,14 +656,21 @@ p_max_global = float(df["price"].quantile(0.95))
 # 10. Save parameters
 # ─────────────────────────────────────────
 ABM_PARAMS = {
-    "kappa": round(float(kappa), 6),
+    "kappa": round(float(kappa_global), 6),
     "alpha": round(float(alpha), 6),
     "D_diff": round(float(D_diff), 6),
     "gamma": round(float(gamma), 8),
     "dt": 0.05,
     "beta": 1e-10,
 
-    "global_sigma": round(float(global_sigma), 6),
+    # NEW — unit bridge
+    "demand_to_hkd": round(float(demand_to_hkd), 6),
+
+    # NEW — derived sigma (replaces hardcoded noise_scale)
+    "target_sigma_global": round(float(target_sigma_global), 6),
+    "noise_to_reaction_ratio": NOISE_TO_REACTION_RATIO,
+
+    "global_sigma": round(float(target_sigma_global), 6),
     "global_p_min": round(float(p_min_global), 6),
     "global_p_max": round(float(p_max_global), 6),
 
@@ -589,6 +679,12 @@ ABM_PARAMS = {
 
     "n_districts": int(n_districts),
     "n_listings": int(len(df)),
+
+    # Diagnostic ratios for Phase 3 gate
+    "target_reaction_magnitude": round(float(target_reaction_per_listing), 6),
+    "target_noise_magnitude": round(
+        float(NOISE_TO_REACTION_RATIO * target_reaction_per_listing), 6
+    ),
 }
 
 with open(OUTPUT_PARAMS_PATH, "w") as f:

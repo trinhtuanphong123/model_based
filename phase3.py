@@ -290,12 +290,11 @@ plt.show()
 
 def run_force_hierarchy_gate(
     diag_A: dict,
-    mean_abs_diffusion_A: pd.Series,
-    mean_abs_reaction_A: pd.Series,
-    mean_abs_bounds_A: pd.Series,
-    mean_abs_noise_A: pd.Series,
-    diag_C: dict,
-    mean_abs_reaction_C: pd.Series,
+    mean_abs_diffusion_A,
+    mean_abs_reaction_A,
+    mean_abs_bounds_A,
+    mean_abs_noise_A,
+    mean_abs_reaction_C,
     initial_mean_price: float,
 ) -> bool:
     """
@@ -450,38 +449,7 @@ def run_force_hierarchy_gate(
     print("\n✓ ALL CHECKS PASSED — System is cleared for Phase 4.")
     print("=" * 72)
     return True
-# -----------------------------------------------------------------------------
-# 10) Empirical report
-# -----------------------------------------------------------------------------
-print("\n" + "=" * 72)
-print("EMPIRICAL VALIDATION REPORT")
-print("This is a diagnostic test, not a mathematical proof.")
-print("=" * 72)
 
-print(f"\n[Test A: Full System]")
-print(f" Starting Mean Price : {diag_A['start_mean']:.2f} HKD")
-print(f" Ending Mean Price   : {diag_A['end_mean']:.2f} HKD")
-print(f" Macro Price Drift   : {diag_A['drift_pct']:+.2f}% over {SIMULATION_STEPS} steps")
-print(f" Reaction vs Noise ratio : {mean_abs_reaction_A.iloc[-1] / (mean_abs_noise_A.iloc[-1] + 1e-8):.4f}")
-
-if abs(diag_A["drift_pct"]) < 5.0:
-    print("  [✓] Convergence check: drift stays within a moderate range.")
-else:
-    print("  [!] Warning: full system drift is large. Check gamma, dt, or beta.")
-
-print(f"\n[Test B: Pure Diffusion]")
-print(f" Starting Std Dev    : {diag_B['std_price'].iloc[0]:.4f}")
-print(f" Ending Std Dev      : {diag_B['std_price'].iloc[-1]:.4f}")
-
-if diag_B["std_price"].iloc[-1] < diag_B["std_price"].iloc[0]:
-    print("  [✓] Smoothing check: diffusion reduces dispersion over time.")
-else:
-    print("  [!] Warning: diffusion does not appear to smooth the market.")
-
-print(f"\n[Test C: Pure Reaction]")
-print(f" Starting Mean Price : {diag_C['start_mean']:.2f} HKD")
-print(f" Ending Mean Price   : {diag_C['end_mean']:.2f} HKD")
-print(f" Macro Price Drift   : {diag_C['drift_pct']:+.2f}%")
 # Extract Test C reaction for gate
 # -----------------------------------------------------------------------------
 # 10a) Force ratio trajectory — the key diagnostic the old code lacked
@@ -543,26 +511,6 @@ gate_passed = run_force_hierarchy_gate(
     mean_abs_reaction_A=mean_abs_reaction_A,
     mean_abs_bounds_A=mean_abs_bounds_A,
     mean_abs_noise_A=mean_abs_noise_A,
-    diag_C=diag_C,
     mean_abs_reaction_C=mean_abs_reaction_C,
     initial_mean_price=diag_A["start_mean"],
 )
-
-final_reaction = float(mean_abs_reaction_C.iloc[-1])
-
-print(f" Mean |Reaction| (final) : {final_reaction:.6f}")
-
-if final_reaction < 1e-2:
-    print("  [✓] Micro-equilibrium: reaction converges to ~0 per agent.")
-else:
-    print("  [!] Warning: reaction not converging → check local_kappa or gamma.")
-
-print("\n[Latent Force Snapshot from Test A]")
-print(f" Mean |Diffusion|    : {mean_abs_diffusion_A.iloc[-1]:.4f}")
-print(f" Mean |Reaction|     : {mean_abs_reaction_A.iloc[-1]:.4f}")
-print(f" Mean |Bounds|       : {mean_abs_bounds_A.iloc[-1]:.4f}")
-print(f" Mean |Noise|        : {mean_abs_noise_A.iloc[-1]:.4f}")
-
-print("=" * 72)
-print("Phase 3 Complete.")
-print("=" * 72)

@@ -470,14 +470,15 @@ weight_df.to_csv(OUTPUT_WEIGHTS_PATH)
 print(f"  ✓ Saved spatial weights -> {OUTPUT_WEIGHTS_PATH}")
   
 
+
+# 8d. PDE parameters κ, α, D_diff, σ, p_min, p_max
+print("  [8d] Estimating localized PDE parameters ...")
+
 mean_price_global = float(df["price"].mean())
 mean_demand_global = float(df["monthly_bookings_proxy"].replace(0, np.nan).mean())
 mean_demand_global = max(mean_demand_global, 1e-6)
 
 demand_to_hkd = mean_price_global / mean_demand_global
-# 8d. PDE parameters κ, α, D_diff, σ, p_min, p_max
-# 8d. PDE parameters κ, α, D_diff, σ, p_min, p_max
-print("  [8d] Estimating localized PDE parameters ...")
 
 # ─────────────────────────────────────────
 # 1. District-level statistics
@@ -490,81 +491,24 @@ district_stats = (
         mean_demand=("monthly_bookings_proxy", "mean"),
         local_p_min=("price", lambda x: x.quantile(0.05)),
         local_p_max=("price", lambda x: x.quantile(0.95)),
-
-        # ✔ Controlled noise (NOT too small, NOT exploding)
-        local_sigma=("price", lambda x: x.std() * 0.1),
     )
     .reset_index()
 )
 
 # ─────────────────────────────────────────
-# 2. Merge localized bounds
-# ─────────────────────────────────────────
-df = df.merge(
-    district_stats[["neighbourhood_cleansed", "local_p_min", "local_p_max", "local_sigma"]],
-    on="neighbourhood_cleansed",
-    how="left",
-)
- # TARGET REACTION MAGNITUDE (per listing, at t=0 with small perturbation)
-# We use a 10% demand perturbation as the reference signal.
-# This is NOT the equilibrium point — it is the response to a small nudge.
-
-perturbation_fraction = 0.10
-target_reaction_per_listing = (
-    alpha
-    * perturbation_fraction
-    * mean_demand_global
-    * demand_to_hkd
-)
-target_reaction_per_listing = max(target_reaction_per_listing, 1.0)
-
-# NOISE TARGET: 10% of reaction magnitude
-# noise = noise_scale * sigma * N(0,1) * sqrt(dt)
-# Expected |noise| ≈ noise_scale * sigma * sqrt(2/pi) * sqrt(dt)
-# Solving for sigma:
-
-NOISE_TO_REACTION_RATIO = 0.10
-noise_scale = 1.0  # fixed at 1.0 — no more free parameter
-sqrt_dt = np.sqrt(0.05)
-expected_noise_unit = noise_scale * sqrt_dt * np.sqrt(2 / np.pi)
-
-target_sigma_global = (
-    NOISE_TO_REACTION_RATIO * target_reaction_per_listing / expected_noise_unit
-)
-
-# Apply per-district with relative scaling from price std
-district_stats["local_sigma"] = (
-    target_sigma_global
-    * (district_stats["median_price"] / median_price_mean)
-).clip(lower=0.5)
-
-
-global_sigma = float(df["price"].std() * 0.1)
-if not np.isfinite(global_sigma) or global_sigma <= 0:
-    global_sigma = 1.0
-
-df["local_sigma"] = (
-    df["local_sigma"]
-    .replace([np.inf, -np.inf], np.nan)
-    .fillna(global_sigma)
-)
-
-# ─────────────────────────────────────────
-# 3. Core statistics
+# 2. Core statistics (MUST come before alpha and sigma)
 # ─────────────────────────────────────────
 median_price_mean = float(district_stats["median_price"].mean())
 mean_demand_mean = float(district_stats["mean_demand"].mean())
-
 median_price_mean = max(median_price_mean, 1e-6)
 
-
 # ─────────────────────────────────────────
-# 4. GLOBAL κ (giữ để đảm bảo tính vật lý)
+# 3. GLOBAL κ
 # ─────────────────────────────────────────
 kappa = mean_demand_mean / median_price_mean
 
 # ─────────────────────────────────────────
-# 5. Spatial diffusion strength
+# 4. Spatial diffusion strength
 # ─────────────────────────────────────────
 district_price_vec = district_stats.set_index("neighbourhood_cleansed")["median_price"]
 price_vals = district_price_vec.reindex(districts).fillna(district_price_vec.mean()).values.astype(float)
@@ -580,41 +524,70 @@ else:
 D_diff = np.clip(abs(morans_i) * 0.05, 0.01, 0.10)
 
 # ─────────────────────────────────────────
-# 6. Reaction strength (CRITICAL FIX)
+# 5. Reaction strength α (MUST come before sigma block)
 # ─────────────────────────────────────────
-# Không được set alpha quá lớn
-# alpha = np.clip(1.0 / median_price_mean, 1e-4, 5e-3)
+perturbation_fraction = 0.10
 # Target: a 10% demand shock should move price by ~1% of median per dt
 target_delta_P = 0.01 * median_price_mean   # HKD per step
 reference_D_kappa_P = perturbation_fraction * mean_demand_global * demand_to_hkd
 
 alpha = target_delta_P / (reference_D_kappa_P * 0.05)  # divide by dt
 alpha = float(np.clip(alpha, 0.01, 5.0))
+
 # ─────────────────────────────────────────
-# 7. Demand sensitivity
+# 6. Noise σ (uses alpha + median_price_mean — both now defined)
+# ─────────────────────────────────────────
+# TARGET REACTION MAGNITUDE (per listing, at t=0 with small perturbation)
+target_reaction_per_listing = (
+    alpha
+    * perturbation_fraction
+    * mean_demand_global
+    * demand_to_hkd
+)
+target_reaction_per_listing = max(target_reaction_per_listing, 1.0)
+
+# NOISE TARGET: 10% of reaction magnitude
+NOISE_TO_REACTION_RATIO = 0.10
+noise_scale = 1.0
+sqrt_dt = np.sqrt(0.05)
+expected_noise_unit = noise_scale * sqrt_dt * np.sqrt(2 / np.pi)
+
+target_sigma_global = (
+    NOISE_TO_REACTION_RATIO * target_reaction_per_listing / expected_noise_unit
+)
+
+# Apply per-district with relative scaling from median price
+district_stats["local_sigma"] = (
+    target_sigma_global
+    * (district_stats["median_price"] / median_price_mean)
+).clip(lower=0.5)
+
+# ─────────────────────────────────────────
+# 7. Merge localized bounds into df (AFTER sigma is fully computed)
+# ─────────────────────────────────────────
+df = df.merge(
+    district_stats[["neighbourhood_cleansed", "local_p_min", "local_p_max", "local_sigma"]],
+    on="neighbourhood_cleansed",
+    how="left",
+)
+
+# Fallback: use target_sigma_global (NOT old price.std() * 0.1)
+df["local_sigma"] = (
+    df["local_sigma"]
+    .replace([np.inf, -np.inf], np.nan)
+    .fillna(target_sigma_global)
+    .clip(lower=0.5)
+)
+
+# ─────────────────────────────────────────
+# 8. Demand sensitivity
 # ─────────────────────────────────────────
 gamma = 1e-5
 
 # ─────────────────────────────────────────
-# 8. (OPTIONAL) Local kappa — nhưng KHÔNG thay thế global
+# 9. Local kappa — calibrated to district equilibrium
+#    (old broken formula removed entirely)
 # ─────────────────────────────────────────
-df["local_kappa"] = (
-    (df["monthly_bookings_proxy"] * np.exp(-gamma * df["price"])) / df["price"]
-)
-
-df["local_kappa"] = (
-    df["local_kappa"]
-    .replace([np.inf, -np.inf], np.nan)
-    .fillna(kappa)   # fallback về global → giữ consistency
-)
-
-
-# TARGET EQUILIBRIUM: district median price (not individual listing price)
-# Each listing's kappa is calibrated to the district center,
-# so listings above the median have downward pull,
-# listings below the median have upward pull.
-# This creates natural market mean-reversion without explosive divergence.
-
 district_equilibrium = district_stats.set_index(
     "neighbourhood_cleansed"
 )["median_price"]
@@ -624,7 +597,6 @@ df["district_equilibrium_price"] = df["neighbourhood_cleansed"].map(
 )
 
 # kappa_i = D_i_base_converted / P_equilibrium_i
-# where D_i_base_converted is demand in HKD units
 df["demand_hkd"] = df["monthly_bookings_proxy"] * demand_to_hkd
 
 df["local_kappa"] = (

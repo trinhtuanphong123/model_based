@@ -41,9 +41,13 @@ class HostAgent:
 
         # State variables
         self.price = float(initial_price)
-        self.base_demand = float(base_demand)
-        self.demand = float(base_demand)
         self.occupancy = float(base_occupancy)
+
+        # Demand: convert to HKD units
+        self.base_demand_raw = float(base_demand)
+        self.base_demand = float(base_demand * demand_to_hkd)  # HKD units
+        self.demand = self.base_demand
+        self.demand_to_hkd = float(demand_to_hkd)
 
         # Localized parameters
         self.p_min = float(p_min)
@@ -51,18 +55,13 @@ class HostAgent:
         self.local_sigma = float(local_sigma)
         self.local_kappa = float(local_kappa)
 
-        # History
+        # History (all state variables must be set before this)
         self.price_history = [self.price]
         self.demand_history = [self.demand]
         self.diffusion_history = [0.0]
         self.reaction_history = [0.0]
         self.bounds_history = [0.0]
         self.noise_history = [0.0]
-        
-        self.base_demand_raw = float(base_demand)
-        self.base_demand = float(base_demand * demand_to_hkd)  # HKD units
-        self.demand = self.base_demand
-        self.demand_to_hkd = float(demand_to_hkd)
 
 
     def update_state(
@@ -335,6 +334,7 @@ class ABMSimulator:
             if key not in self.params:
                 raise ValueError(f"Missing required parameter in params.json: '{key}'")
     def _initialize_agents(self):
+        demand_to_hkd = float(self.params.get("demand_to_hkd", 1.0))
         for _, row in self.df.iterrows():
             agent = HostAgent(
                 agent_id=str(row["id"]),
@@ -345,8 +345,8 @@ class ABMSimulator:
                 local_sigma=float(row["local_sigma"]),
                 base_demand=float(row["monthly_bookings_proxy"]),
                 base_occupancy=float(row["occupancy_rate"]),
-                local_kappa=float(row["local_kappa"]),   # 🔥 THIẾU CÁI NÀY TRƯỚC ĐÓ
-                demand_to_hkd=demand_to_hkd,   # NEW
+                local_kappa=float(row["local_kappa"]),
+                demand_to_hkd=demand_to_hkd,
             )
             self.agents.append(agent)
 

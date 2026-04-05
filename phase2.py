@@ -257,25 +257,30 @@ class HongKongEnvironment:
             )
 
         self.step_count += 1
+
+        # In HongKongEnvironment.step(), replace the hierarchy check:
         if self.step_count % 10 == 0:
             mean_diff   = float(np.mean(np.abs(diffusion)))
             mean_react  = float(np.mean(np.abs(reaction)))
             mean_noise  = float(np.mean(np.abs(noise)))
 
-            ratio_rn = mean_react / (mean_noise + 1e-8)
-            ratio_dn = mean_diff  / (mean_noise + 1e-8)
-
-            hierarchy_ok = (ratio_rn >= 2.0) and (ratio_dn >= 0.1)
-            flag = "✓" if hierarchy_ok else "⚠ HIERARCHY VIOLATION"
+            # Only compute ratios and hierarchy check when noise is active
+            if mean_noise > 1e-6:
+                ratio_rn = mean_react / (mean_noise + 1e-8)
+                ratio_dn = mean_diff  / (mean_noise + 1e-8)
+                hierarchy_ok = (ratio_rn >= 2.0) and (ratio_dn >= 0.1)
+                flag = "✓" if hierarchy_ok else "⚠ HIERARCHY VIOLATION"
+                ratio_str = f"R/N={ratio_rn:.2f}  D/N={ratio_dn:.2f}  {flag}"
+            else:
+                ratio_str = "noise=0 (isolated-force test)"
 
             print(
                 f"[Step {self.step_count:>4}] "
                 f"|diff|={mean_diff:7.2f}  "
                 f"|react|={mean_react:7.2f}  "
                 f"|noise|={mean_noise:7.2f}  "
-                f"R/N={ratio_rn:.2f}  D/N={ratio_dn:.2f}  {flag}"
+                f"{ratio_str}"
             )
-
 class ABMSimulator:
     """
     Orchestrates the simulation, loads data, and extracts time-series outputs.

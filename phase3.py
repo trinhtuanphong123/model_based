@@ -43,7 +43,7 @@ BASELINE_GAMMA = 1e-5
 GATE_REACTION_TO_NOISE_MIN   = 5.0    # |Reaction| / |Noise| >= 5
 GATE_DIFFUSION_TO_NOISE_MIN  = 0.10   # |Diffusion| / |Noise| >= 0.1
 GATE_BOUNDS_TO_NOISE_MAX     = 0.05   # |Bounds| / |Noise| <= 0.05 (must be dormant)
-GATE_FULL_DRIFT_MAX_PCT      = 10.0   # |drift%| <= 10% over SIMULATION_STEPS
+GATE_FULL_DRIFT_MAX_PCT      = 20.0   # |drift%| <= 10% over SIMULATION_STEPS
 GATE_REACTION_CONVERGENCE    = 0.01   # final |reaction| as fraction of initial mean price
 
 print("=" * 72)

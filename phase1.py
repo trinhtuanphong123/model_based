@@ -603,13 +603,20 @@ df["local_kappa"] = (
     df["demand_hkd"] * np.exp(-gamma * df["district_equilibrium_price"])
     / df["district_equilibrium_price"]
 )
+# Use median instead of mean for both to avoid skew distortion
+median_demand_global = float(
+    df["monthly_bookings_proxy"].replace(0, np.nan).median()
+)
+median_demand_global = max(median_demand_global, 1e-6)
 
-# Fallback: global kappa computed the same way
+# demand_to_hkd remains mean_price / mean_demand (exchange rate)
+# but kappa is now calibrated on median/median to avoid skew bias
 kappa_global = (
-    mean_demand_global * demand_to_hkd
+    median_demand_global * demand_to_hkd
     * np.exp(-gamma * median_price_mean)
     / median_price_mean
 )
+
 
 df["local_kappa"] = (
     df["local_kappa"]

@@ -129,6 +129,29 @@ check_integrity(test_df[required_orc_cols + ["price_t_1", "y_target_price"]], "t
 print("  ✓ All matrices passed NaN/Inf checks.")
 
 # -----------------------------------------------------------------------------
+# 3b) Training signal quality check
+# -----------------------------------------------------------------------------
+print("\n[2b/6] Training signal quality check...")
+
+y_train_std  = float(np.std(y_train))
+y_train_mean = float(np.mean(np.abs(y_train)))
+
+print(f"  y_train std         : {y_train_std:.4f} HKD")
+print(f"  y_train mean |ΔP|   : {y_train_mean:.4f} HKD")
+
+SIGNAL_STD_MINIMUM = 0.5   # HKD — if std is below this, training data has no signal
+
+if y_train_std < SIGNAL_STD_MINIMUM:
+    raise RuntimeError(
+        f"Training signal too weak: y_train std = {y_train_std:.6f} HKD "
+        f"(minimum required: {SIGNAL_STD_MINIMUM} HKD). "
+        f"The PDE is not generating meaningful price dynamics. "
+        f"Re-run Phase 1 → Phase 3 gate → Phase 4 before proceeding."
+    )
+
+print(f"  ✓ Training signal is adequate (std={y_train_std:.4f} > {SIGNAL_STD_MINIMUM}).")
+
+# -----------------------------------------------------------------------------
 # 4) Split features / target
 # -----------------------------------------------------------------------------
 X_train_sim = train_df[FEATURES_SIM2REAL].copy()
@@ -201,11 +224,21 @@ def eval_price(name: str, pred_price: np.ndarray):
     return {"mae": mae, "rmse": rmse, "r2": r2, "mae_pct": mae_pct}
 
 def eval_delta(name: str, pred_delta: np.ndarray):
-    mae = mean_absolute_error(y_test_delta, pred_delta)
+    mae  = mean_absolute_error(y_test_delta, pred_delta)
     rmse = np.sqrt(mean_squared_error(y_test_delta, pred_delta))
-    r2 = r2_score(y_test_delta, pred_delta)
-    print(f"  {name:<18} | Δ MAE = {mae:.6f} | Δ RMSE = {rmse:.6f} | Δ R² = {r2:.4f}")
-    return {"mae": mae, "rmse": rmse, "r2": r2}
+    r2   = r2_score(y_test_delta, pred_delta)
+
+    delta_var = float(np.var(y_test_delta))
+    var_warning = ""
+    if delta_var < 1.0:
+        var_warning = " ⚠ low delta variance — R² unreliable"
+
+    print(
+        f"  {name:<18} | Δ MAE = {mae:.6f} | "
+        f"Δ RMSE = {rmse:.6f} | Δ R² = {r2:.4f}"
+        f"{var_warning}"
+    )
+    return {"mae": mae, "rmse": rmse, "r2": r2, "delta_variance": delta_var}
 
 print("\n[5/6] Final zero-shot evaluation (localized contagion)...")
 print("-" * 72)
@@ -224,7 +257,23 @@ print("-" * 72)
 # 9) Gap analysis
 # -----------------------------------------------------------------------------
 uplift_vs_naive = ((metrics_naive["mae"] - metrics_sim["mae"]) / metrics_naive["mae"]) * 100 if metrics_naive["mae"] != 0 else np.nan
-gap_pct = ((metrics_sim["mae"] - metrics_orc["mae"]) / metrics_orc["mae"]) * 100 if metrics_orc["mae"] != 0 else np.nan
+
+oracle_mae  = metrics_orc["mae"]
+sim2real_mae = metrics_sim["mae"]
+
+if oracle_mae > 0:
+    gap_pct = ((sim2real_mae - oracle_mae) / oracle_mae) * 100
+else:
+    gap_pct = np.nan
+
+gap_direction = (
+    "Sim2Real is worse than Oracle (expected)"
+    if sim2real_mae >= oracle_mae
+    else "⚠ Sim2Real outperforms Oracle — check for Oracle overfitting"
+)
+
+print(f"Information-loss gap : {gap_pct:.2f}% between Oracle and Sim2Real.")
+print(f"Direction            : {gap_direction}")
 
 print("\n" + "=" * 72)
 print("SCIENTIFIC GAP ANALYSIS")
@@ -243,19 +292,22 @@ print("=" * 72)
 print("\n[6/6] Exporting Phase 5B assets...")
 
 output_df = pd.DataFrame({
-    "agent_id": test_df["agent_id"].astype(str).values,
-    "time_step": test_df["time_step"].values,
-    "scenario_regime": test_df["scenario_regime"].astype(str).values,
-    "spatial_lag_proxy_t_1": test_df["spatial_lag_proxy_t_1"].values,
-    "price_t_1": base_price_test,
-    "actual_price": actual_price_test,
-    "actual_delta": y_test_delta,
-    "pred_delta_naive": pred_delta_naive,
-    "pred_delta_sim": pred_delta_sim,
-    "pred_delta_orc": pred_delta_orc,
-    "pred_price_naive": pred_price_naive,
-    "pred_price_sim": pred_price_sim,
-    "pred_price_orc": pred_price_orc,
+    "agent_id":                  test_df["agent_id"].astype(str).values,
+    "neighbourhood_cleansed":    test_df["neighbourhood_cleansed"].astype(str).values,  # NEW
+    "time_step":                 test_df["time_step"].values,
+    "scenario_regime":           test_df["scenario_regime"].astype(str).values,
+    "spatial_lag_proxy_t_1":     test_df["spatial_lag_proxy_t_1"].values,
+    "diffusion_proxy":           test_df["diffusion_proxy"].values,                     # NEW
+    "diffusion_real_t_1":        test_df["diffusion_real_t_1"].values,                  # NEW
+    "price_t_1":                 base_price_test,
+    "actual_price":              actual_price_test,
+    "actual_delta":              y_test_delta,
+    "pred_delta_naive":          pred_delta_naive,
+    "pred_delta_sim":            pred_delta_sim,
+    "pred_delta_orc":            pred_delta_orc,
+    "pred_price_naive":          pred_price_naive,
+    "pred_price_sim":            pred_price_sim,
+    "pred_price_orc":            pred_price_orc,
 })
 
 output_df.to_parquet(OUTPUT_PRED_PATH, index=False)
@@ -297,20 +349,26 @@ plt.show()
 # -----------------------------------------------------------------------------
 # 12) Save report
 # -----------------------------------------------------------------------------
+
+
 report = {
-    "train_rows": int(len(train_df)),
-    "test_rows": int(len(test_df)),
-    "naive": metrics_naive,
-    "sim2real": metrics_sim,
-    "oracle": metrics_orc,
-    "delta_sim2real": metrics_delta_sim,
-    "delta_oracle": metrics_delta_orc,
-    "uplift_vs_naive_pct": float(uplift_vs_naive),
-    "gap_oracle_vs_sim2real_pct": float(gap_pct),
-    "feature_spec_path": FEATURE_SPEC_PATH,
-    "predictions_path": OUTPUT_PRED_PATH,
-    "model_sim_path": MODEL_SIM_PATH,
-    "model_oracle_path": MODEL_ORC_PATH,
+    "train_rows":                  int(len(train_df)),
+    "test_rows":                   int(len(test_df)),
+    "features_sim2real_used":      FEATURES_SIM2REAL,        # NEW
+    "features_oracle_used":        FEATURES_ORACLE,           # NEW
+    "target_column":               TARGET,                    # NEW
+    "naive":                       metrics_naive,
+    "sim2real":                    metrics_sim,
+    "oracle":                      metrics_orc,
+    "delta_sim2real":              metrics_delta_sim,
+    "delta_oracle":                metrics_delta_orc,
+    "uplift_vs_naive_pct":         float(uplift_vs_naive),
+    "gap_oracle_vs_sim2real_pct":  float(gap_pct),
+    "gap_direction":               gap_direction,             # NEW
+    "feature_spec_path":           FEATURE_SPEC_PATH,
+    "predictions_path":            OUTPUT_PRED_PATH,
+    "model_sim_path":              MODEL_SIM_PATH,
+    "model_oracle_path":           MODEL_ORC_PATH,
 }
 
 with open(REPORT_PATH, "w") as f:

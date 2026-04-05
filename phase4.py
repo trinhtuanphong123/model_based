@@ -29,7 +29,13 @@ SHOCK_START_DAY = 30
 RAMP_END_DAY = 60
 RANDOM_SEED = 42
 
-MACRO_PRESSURE_MULTIPLIER = 20.0
+with open(PARAMS_PATH, "r") as f:
+    _params = json.load(f)
+
+DEMAND_TO_HKD = float(_params["demand_to_hkd"])
+TARGET_REACTION_MAGNITUDE = float(_params["target_reaction_magnitude"])
+
+SHOCK_REACTION_MULTIPLE = 3.0   # shock injects 3x the baseline reaction force
 
 sns.set_theme(style="whitegrid")
 plt.rcParams["figure.figsize"] = (14, 8)
@@ -59,55 +65,64 @@ def scenario_zero_shock(time_step, df):
 
 
 def scenario_tourism_boom(time_step, df):
-    base_demand = df["monthly_bookings_proxy"].values.astype(float)
+    """
+    Global demand surge: all agents receive a positive F_t shock.
+    Shock is expressed in HKD units via demand_to_hkd.
+    Ramped linearly from SHOCK_START_DAY to RAMP_END_DAY for realism.
+    Magnitude: SHOCK_REACTION_MULTIPLE × TARGET_REACTION_MAGNITUDE per agent.
+    """
     n_agents = len(df)
 
     if time_step < SHOCK_START_DAY:
         return np.zeros(n_agents, dtype=float)
+
+    # F_t in HKD: convert base demand to HKD then apply shock multiple
+    base_demand_hkd = df["monthly_bookings_proxy"].values.astype(float) * DEMAND_TO_HKD
+    shock_magnitude = STRESS_PARAMS["macro_boom_multiplier"] * base_demand_hkd
 
     if SHOCK_START_DAY <= time_step < RAMP_END_DAY:
         ramp_factor = (time_step - SHOCK_START_DAY) / float(RAMP_END_DAY - SHOCK_START_DAY)
-        return (
-            STRESS_PARAMS["macro_boom_multiplier"]
-            * base_demand
-            * ramp_factor
-            * MACRO_PRESSURE_MULTIPLIER
-        )
+        return shock_magnitude * ramp_factor
 
-    return (
-        STRESS_PARAMS["macro_boom_multiplier"]
-        * base_demand
-        * MACRO_PRESSURE_MULTIPLIER
-    )
+    return shock_magnitude
+
 
 def scenario_economic_crash(time_step, df):
-    base_demand = df["monthly_bookings_proxy"].values.astype(float)
+    """
+    Global demand collapse: all agents receive a negative F_t shock.
+    Shock is expressed in HKD units via demand_to_hkd.
+    Applied instantaneously at SHOCK_START_DAY (no ramp — models a sudden crisis).
+    """
     n_agents = len(df)
 
     if time_step < SHOCK_START_DAY:
         return np.zeros(n_agents, dtype=float)
 
-    return (
-        STRESS_PARAMS["macro_crash_fraction"]
-        * base_demand
-        * MACRO_PRESSURE_MULTIPLIER
-    )
+    base_demand_hkd = df["monthly_bookings_proxy"].values.astype(float) * DEMAND_TO_HKD
+    return STRESS_PARAMS["macro_crash_fraction"] * base_demand_hkd
+
+
 
 def scenario_localized_contagion(time_step, df):
-    base_demand = df["monthly_bookings_proxy"].values.astype(float)
+    """
+    Spatially restricted demand surge: only Yau Tsim Mong agents are shocked.
+    This is the zero-shot test scenario — the ML model has never seen
+    a spatially restricted shock during training.
+    Shock magnitude is identical to the boom scenario for comparability.
+    """
     n_agents = len(df)
-
-    is_ytm = (df["neighbourhood_cleansed"] == "Yau Tsim Mong").values
     F_t = np.zeros(n_agents, dtype=float)
 
-    if time_step >= SHOCK_START_DAY:
-        F_t[is_ytm] = (
-            STRESS_PARAMS["local_contagion_spike"]
-            * base_demand[is_ytm]
-            * MACRO_PRESSURE_MULTIPLIER
-        )
+    if time_step < SHOCK_START_DAY:
+        return F_t
+
+    is_ytm = (df["neighbourhood_cleansed"] == "Yau Tsim Mong").values
+    base_demand_hkd = df["monthly_bookings_proxy"].values.astype(float) * DEMAND_TO_HKD
+
+    F_t[is_ytm] = STRESS_PARAMS["local_contagion_spike"] * base_demand_hkd[is_ytm]
 
     return F_t
+
 
 # -----------------------------------------------------------------------------
 # 4) Helpers
@@ -229,6 +244,62 @@ ts_base, latent_base = run_and_export_scenario(
 )
 scenario_summaries.append(summarize_scenario("baseline_no_shock", latent_base))
 
+
+
+print("\n" + "=" * 72)
+print("PHASE 4 FORCE AUDIT: Verifying shock detectability")
+print("=" * 72)
+
+SHOCK_DETECTABILITY_THRESHOLD = 2.0  # shocked reaction must be > 2x baseline noise
+
+# Load baseline noise level from the no-shock scenario
+baseline_noise = float(
+    latent_base["noise"].abs().mean(axis=1).iloc[-1]
+)
+
+audit_passed = True
+
+for scenario_name, latent in [
+    ("tourism_boom",         latent_boom),
+    ("economic_crash",       latent_crash),
+    ("localized_contagion",  latent_contagion),
+]:
+    # Use post-shock window only (after SHOCK_START_DAY)
+    reaction_df = latent["reaction"]
+    post_shock_reaction = float(
+        reaction_df.iloc[SHOCK_START_DAY:].abs().mean(axis=1).mean()
+    )
+
+    ratio = post_shock_reaction / (baseline_noise + 1e-8)
+    passed = ratio >= SHOCK_DETECTABILITY_THRESHOLD
+    status = "✓ PASS" if passed else "✗ FAIL"
+
+    print(
+        f"  [{status}] {scenario_name:<25} "
+        f"post-shock |reaction|={post_shock_reaction:.2f}  "
+        f"baseline |noise|={baseline_noise:.2f}  "
+        f"ratio={ratio:.2f}  "
+        f"threshold={SHOCK_DETECTABILITY_THRESHOLD:.1f}x"
+    )
+
+    if not passed:
+        audit_passed = False
+        print(
+            f"    → Shock in '{scenario_name}' is not detectable above noise.\n"
+            f"      Fix: increase SHOCK_REACTION_MULTIPLE or re-check demand_to_hkd.\n"
+        )
+
+if not audit_passed:
+    raise RuntimeError(
+        "Phase 4 force audit FAILED. Exported data contains undetectable shocks. "
+        "Phase 5 ML training would produce meaningless models. "
+        "Fix shock magnitudes and re-run Phase 4."
+    )
+
+print("\n✓ All shock scenarios passed detectability audit.")
+print("=" * 72)
+
+
 # -----------------------------------------------------------------------------
 # 6) Save summary table
 # -----------------------------------------------------------------------------
@@ -272,10 +343,13 @@ plt.plot(
 )
 
 plt.title(
-    "Phase 4: Market Mean Price Reaction to Extreme Scenarios\n(Endogenous Demand + Exogenous F(t) Shocks)",
-    fontsize=16,
+    f"Phase 4: Market Mean Price Reaction to Extreme Scenarios\n"
+    f"(Endogenous Demand + Exogenous F(t) Shocks | "
+    f"demand_to_hkd={DEMAND_TO_HKD:.2f} HKD/booking)",
+    fontsize=14,
     fontweight="bold"
-)
+) 
+
 plt.xlabel("Time Step (Days)", fontsize=12)
 plt.ylabel("Mean Market Price (HKD)", fontsize=12)
 plt.axvline(x=SHOCK_START_DAY, color="grey", linestyle=":", label=f"Shock Initiation (Day {SHOCK_START_DAY})")
@@ -289,3 +363,4 @@ print("Export convention ready for Phase 5A:")
 print("  synthetic_<scenario>_<component>.parquet")
 print("Components: price, demand, diffusion, reaction, bounds, noise")
 print("=" * 72)
+

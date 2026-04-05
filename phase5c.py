@@ -74,38 +74,26 @@ print(f" -> Test size: {len(pred_df):,}")
 # =============================================================================
 print("\n[2/6] Model reliance (block permutation)...")
 
-reliance = {}
 
+mae_base = mean_absolute_error(actual_price, pred_price)  # computed ONCE before loop
+print(f"  Baseline MAE (unperturbed): {mae_base:.4f}")
+
+reliance = {}
 for f in FEATURES_SIM2REAL:
     X_perm = X_test.copy()
 
+    # Permute within time_step blocks to destroy temporal spatial structure
+    # while preserving marginal distribution
     temp = test_df[["time_step", f]].copy()
-    temp[f] = temp.groupby("time_step")[f].transform(np.random.permutation)
-
+    temp[f] = temp.groupby("time_step")[f].transform(
+        lambda x: x.sample(frac=1, random_state=42).values
+    )
     X_perm[f] = temp[f].values
 
-    pred_perm = model_sim.predict(X_perm)
-    mae_perm = mean_absolute_error(actual_price, base_price + pred_perm)
+    pred_perm  = model_sim.predict(X_perm)
+    mae_perm   = mean_absolute_error(actual_price, base_price + pred_perm)
+    reliance[f] = mae_perm - mae_base
 
-    
-    mae_base = mean_absolute_error(actual_price, pred_price)  # computed ONCE before loop
-    print(f"  Baseline MAE (unperturbed): {mae_base:.4f}")
-
-    reliance = {}
-    for f in FEATURES_SIM2REAL:
-        X_perm = X_test.copy()
-
-        # Permute within time_step blocks to destroy temporal spatial structure
-        # while preserving marginal distribution
-        temp = test_df[["time_step", f]].copy()
-        temp[f] = temp.groupby("time_step")[f].transform(
-            lambda x: x.sample(frac=1, random_state=42).values
-        )
-        X_perm[f] = temp[f].values
-
-        pred_perm  = model_sim.predict(X_perm)
-        mae_perm   = mean_absolute_error(actual_price, base_price + pred_perm)
-        reliance[f] = mae_perm - mae_base
 
 reliance_df = pd.DataFrame({
     "feature": list(reliance.keys()),
@@ -117,9 +105,6 @@ reliance_df = pd.DataFrame({
 # =============================================================================
 print("\n[3/6] Proxy calibration...")
 
-
-# Proxy error
-test_df["proxy_error"] = np.abs(real_diff - proxy_diff)
 # Section 3 — use pred_df throughout
 real_diff  = pred_df["diffusion_real_t_1"].values
 proxy_diff = pred_df["diffusion_proxy"].values
@@ -135,7 +120,7 @@ pred_df["diff_bin"] = pd.qcut(
 
 # Local R² per decile
 calibration_local = (
-    pred_df.groupby("diff_bin")
+    pred_df.groupby("diff_bin",group_keys=False)
     .apply(lambda g: r2_score(g["diffusion_real_t_1"], g["diffusion_proxy"]))
     .reset_index(name="local_r2")
 )
@@ -222,7 +207,7 @@ if corr > CORR_MIN:
     print(f"[✓] corr={corr:.3f} — model failure driven by proxy failure.")
 else:
     print(f"[✗] corr={corr:.3f} — weak link, spatial claim not supported.")
-    
+
 
 print("\nInterpretation:")
 print("""
@@ -244,7 +229,7 @@ proxy_sorted = np.sort(proxy_diff)
 plt.figure(figsize=(8,6))
 plt.scatter(proxy_diff[::50], real_diff[::50], alpha=0.3)
 plt.plot(proxy_sorted, intercept + slope * proxy_sorted, 'r', linewidth=2, label="OLS fit")
-plt.title(f"Proxy Calibration (R2={r2:.2f}, slope={slope:.2f})")
+plt.title(f"Proxy Calibration (R2={r2_global:.2f}, slope={slope:.2f})")
 plt.xlabel("Proxy")
 plt.ylabel("Real")
 plt.show()
@@ -272,8 +257,13 @@ plt.show()
 # --- FIG 4: SHAP ---
 shap.summary_plot(shap_values, sample)
 
+
 velocity_features = [f for f in FEATURES_SIM2REAL if f.startswith("velocity_")]
-velocity_long = sorted(velocity_features, key=lambda x: int(x.split("_")[1]))[-1]
+velocity_long = sorted(
+    velocity_features,
+    key=lambda x: int(x.split("_")[1].replace("d", ""))
+)[-1]
+
 
 shap.dependence_plot(
     "diffusion_proxy",

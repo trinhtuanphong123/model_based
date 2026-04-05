@@ -128,28 +128,7 @@ check_integrity(test_df[required_orc_cols + ["price_t_1", "y_target_price"]], "t
 
 print("  ✓ All matrices passed NaN/Inf checks.")
 
-# -----------------------------------------------------------------------------
-# 3b) Training signal quality check
-# -----------------------------------------------------------------------------
-print("\n[2b/6] Training signal quality check...")
 
-y_train_std  = float(np.std(y_train))
-y_train_mean = float(np.mean(np.abs(y_train)))
-
-print(f"  y_train std         : {y_train_std:.4f} HKD")
-print(f"  y_train mean |ΔP|   : {y_train_mean:.4f} HKD")
-
-SIGNAL_STD_MINIMUM = 0.5   # HKD — if std is below this, training data has no signal
-
-if y_train_std < SIGNAL_STD_MINIMUM:
-    raise RuntimeError(
-        f"Training signal too weak: y_train std = {y_train_std:.6f} HKD "
-        f"(minimum required: {SIGNAL_STD_MINIMUM} HKD). "
-        f"The PDE is not generating meaningful price dynamics. "
-        f"Re-run Phase 1 → Phase 3 gate → Phase 4 before proceeding."
-    )
-
-print(f"  ✓ Training signal is adequate (std={y_train_std:.4f} > {SIGNAL_STD_MINIMUM}).")
 
 # -----------------------------------------------------------------------------
 # 4) Split features / target
@@ -164,6 +143,29 @@ y_test_delta = test_df[TARGET].to_numpy(dtype=float).ravel()
 
 base_price_test = test_df["price_t_1"].to_numpy(dtype=float)
 actual_price_test = test_df[TARGET_PRICE].to_numpy(dtype=float)
+
+# -----------------------------------------------------------------------------
+# 4b) Training signal quality check (placed here — y_train is now defined)
+# -----------------------------------------------------------------------------
+print("\n[3b/6] Training signal quality check...")
+
+y_train_std  = float(np.std(y_train))
+y_train_mean = float(np.mean(np.abs(y_train)))
+
+print(f"  y_train std         : {y_train_std:.4f} HKD")
+print(f"  y_train mean |ΔP|   : {y_train_mean:.4f} HKD")
+
+SIGNAL_STD_MINIMUM = 0.5
+
+if y_train_std < SIGNAL_STD_MINIMUM:
+    raise RuntimeError(
+        f"Training signal too weak: y_train std = {y_train_std:.6f} HKD "
+        f"(minimum required: {SIGNAL_STD_MINIMUM} HKD). "
+        f"The PDE is not generating meaningful price dynamics. "
+        f"Re-run Phase 1 → Phase 3 gate → Phase 4 before proceeding."
+    )
+
+print(f"  ✓ Training signal is adequate (std={y_train_std:.4f} > {SIGNAL_STD_MINIMUM}).")
 
 # -----------------------------------------------------------------------------
 # 5) Naive baseline

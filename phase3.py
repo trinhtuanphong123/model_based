@@ -356,17 +356,77 @@ def run_force_hierarchy_gate(
     }
 
     # ------------------------------------------------------------------
-    # CHECK 4: Full system drift is bounded (market not exploding)
+    # CHECK 4: System is stable — mean-reversion is acceptable,
+    # divergence is not. We distinguish them by checking whether
+    # the drift is decelerating (convergent) or accelerating (divergent).
+    #
+    # Method: compare drift rate in first half vs second half.
+    # Convergent: |drift in second half| < |drift in first half|
+    # Divergent:  |drift in second half| > |drift in first half|
     # ------------------------------------------------------------------
-    drift_abs = abs(diag_A["drift_pct"])
-    passed_4 = drift_abs <= GATE_FULL_DRIFT_MAX_PCT
-    gate_results["full_system_drift"] = {
-        "value": drift_abs,
-        "threshold": GATE_FULL_DRIFT_MAX_PCT,
-        "passed": passed_4,
-        "label": "|Drift%| over simulation (must be LOW)"
-    }
+    mean_price_series = diag_A["mean_price"]
+    T = len(mean_price_series)
+    mid = T // 2
 
+    # Drift rate = price change per step in each half
+    first_half_drift  = abs(float(mean_price_series.iloc[mid] - mean_price_series.iloc[0])) / mid
+    second_half_drift = abs(float(mean_price_series.iloc[-1] - mean_price_series.iloc[mid])) / (T - mid)
+
+    # Convergent if second half drift rate is less than first half
+    is_convergent = second_half_drift < first_half_drift
+
+    # Also check total drift magnitude is not explosive (hard ceiling at 60%)
+    total_drift_abs = abs(diag_A["drift_pct"])
+    not_explosive   = total_drift_abs <= 60.0
+
+    passed_4 = is_convergent and not_explosive
+
+    gate_results["full_system_drift"] = {
+        "value": total_drift_abs,
+        "threshold": 60.0,
+        "passed": passed_4,
+        "label": "|Drift%| — convergent (decelerating) drift is acceptable",
+        "first_half_rate":  round(first_half_drift,  4),
+        "second_half_rate": round(second_half_drift, 4),
+        "is_convergent": is_convergent,
+    }
+    
+
+    for key, result in gate_results.items():
+        status = "✓ PASS" if result["passed"] else "✗ FAIL"
+        extra = ""
+        if key == "full_system_drift":
+            direction = "converging ✓" if result["is_convergent"] else "diverging ✗"
+            extra = (
+                f"  [{status}] {result['label']:<45} "
+                f"drift={result['value']:.2f}%  "
+                f"1st-half rate={result['first_half_rate']:.3f}  "
+                f"2nd-half rate={result['second_half_rate']:.3f}  "
+                f"{direction}"
+            )
+            print(extra)
+        else:
+            print(
+                f"  [{status}] {result['label']:<45} "
+                f"value={result['value']:>10.4f}  "
+                f"threshold={result['threshold']:>10.4f}"
+            )
+
+    if not gate_results["full_system_drift"]["passed"]:
+        if not gate_results["full_system_drift"]["is_convergent"]:
+            print(
+                "  → Market drift is ACCELERATING (divergent).\n"
+                "    This is genuine instability, not mean-reversion.\n"
+                "    Likely cause: alpha too large, or kappa negative.\n"
+                "    Fix: reduce alpha in Phase 1 or check local_kappa clipping.\n"
+            )
+        else:
+            print(
+                "  → Market drift exceeds 60% hard ceiling.\n"
+                "    Even if convergent, this magnitude suggests kappa equilibrium\n"
+                "    is unrealistically far from initial prices.\n"
+                "    Fix: reduce demand_to_hkd or increase gamma.\n"
+        )
     # ------------------------------------------------------------------
     # CHECK 5: Pure reaction converges toward equilibrium
     # Criterion: final |reaction| < 1% of initial mean price

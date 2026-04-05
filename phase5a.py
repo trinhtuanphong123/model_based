@@ -301,7 +301,7 @@ def process_scenario_master(scenario_label: str):
             pl.col("price_t_1").shift(1).over("agent_id").alias("price_t_2"),
             pl.col("price_t_1").shift(3).over("agent_id").alias("price_t_4"),
             pl.col("price_t_1").shift(7).over("agent_id").alias("price_t_8"),
-            pl.col("price_t_1").rolling_std(window_size=7, min_periods=2).over("agent_id").alias("rolling_7d_sigma"),
+            pl.col("price_t_1").rolling_std(window_size=7, min_samples=2).over("agent_id").alias("rolling_7d_sigma"),
         ])
         .with_columns([
             # Observable Proxy: Price Velocities
@@ -347,8 +347,8 @@ def process_scenario_master(scenario_label: str):
         "ceiling_proximity",
         "floor_proximity",
         "velocity_1d",
-        "velocity_3d",
-        "velocity_7d",
+        "velocity_4d",   # renamed from velocity_3d
+        "velocity_8d",
         "demand_real_t_1",
         "diffusion_real_t_1",
         "reaction_real_t_1",

@@ -73,8 +73,8 @@ print("=" * 72)
 # -----------------------------------------------------------------------------
 FEATURES_SIM2REAL = [
     "velocity_1d",
-    "velocity_3d",
-    "velocity_7d",
+    "velocity_4d",
+    "velocity_8d",
     "rolling_7d_sigma",
     "diffusion_proxy",
     "ceiling_proximity",
@@ -297,17 +297,17 @@ def process_scenario_master(scenario_label: str):
         base_df
         .sort(["agent_id", "time_step"])
         .with_columns([
+
             pl.col("price_t_1").shift(1).over("agent_id").alias("price_t_2"),
             pl.col("price_t_1").shift(3).over("agent_id").alias("price_t_4"),
             pl.col("price_t_1").shift(7).over("agent_id").alias("price_t_8"),
-            pl.col("price_t_1").rolling_std(window_size=7).over("agent_id").alias("rolling_7d_sigma"),
+            pl.col("price_t_1").rolling_std(window_size=7, min_periods=2).over("agent_id").alias("rolling_7d_sigma"),
         ])
         .with_columns([
             # Observable Proxy: Price Velocities
-            (pl.col("price_t_1") - pl.col("price_t_2")).alias("velocity_1d"),
-            (pl.col("price_t_1") - pl.col("price_t_4")).alias("velocity_3d"),
-            (pl.col("price_t_1") - pl.col("price_t_8")).alias("velocity_7d"),
-
+            (pl.col("price_t_1") - pl.col("price_t_2")).alias("velocity_1d"),   # correct: 1-step
+            (pl.col("price_t_1") - pl.col("price_t_4")).alias("velocity_4d"),   # was velocity_3d
+            (pl.col("price_t_1") - pl.col("price_t_8")).alias("velocity_8d"),   # was velocity_7d
             # Properly scaled proxy
             (pl.lit(D_DIFF) * (pl.col("spatial_lag_proxy_t_1") - pl.col("price_t_1"))).alias("diffusion_proxy"),
 
@@ -318,36 +318,7 @@ def process_scenario_master(scenario_label: str):
             pl.lit(scenario_label).alias("scenario_regime"),
         ])
     )
-    # final_df = (
-    #     base_df
-    #     .sort(["agent_id", "time_step"])
-    #     .with_columns([
-    #         # Historical lags on price_t_1
-    #         pl.col("price_t_1").shift(1).over("agent_id").alias("price_t_2"),
-    #         pl.col("price_t_1").shift(3).over("agent_id").alias("price_t_4"),
-    #         pl.col("price_t_1").shift(7).over("agent_id").alias("price_t_8"),
-    #         pl.col("price_t_1").rolling_std(window_size=7).over("agent_id").alias("rolling_7d_sigma"),
-
-    #         # Target delta
-    #         (pl.col("y_target_price") - pl.col("price_t_1")).alias("y_target_delta"),
-
-    #         # Observable velocities
-    #         (pl.col("price_t_1") - pl.col("price_t_2")).alias("velocity_1d"),
-    #         (pl.col("price_t_1") - pl.col("price_t_4")).alias("velocity_3d"),
-    #         (pl.col("price_t_1") - pl.col("price_t_8")).alias("velocity_7d"),
-
-    #         # Observable proxy for diffusion
-    #         (pl.lit(D_DIFF) * (pl.col("spatial_lag_proxy_t_1") - pl.col("price_t_1"))).alias("diffusion_proxy"),
-
-    #         # Bounding proxies
-    #         (pl.col("local_p_max") - pl.col("price_t_1")).alias("ceiling_proximity"),
-    #         (pl.col("price_t_1") - pl.col("local_p_min")).alias("floor_proximity"),
-
-    #         # Scenario tag
-    #         pl.lit(scenario_label).alias("scenario_regime"),
-    #     ])
-    # )
-
+    
     # -------------------------------------------------------------------------
     # Leakage-safe filtering
     # -------------------------------------------------------------------------
@@ -453,6 +424,8 @@ if len(scenario_frames) > 0:
 feature_spec = {
     "burn_in_days": BURN_IN_DAYS,
     "shock_start_day": 30,
+    "demand_to_hkd": float(abm_params["demand_to_hkd"]),
+    "target_reaction_magnitude": float(abm_params["target_reaction_magnitude"]),
     "features_sim2real": FEATURES_SIM2REAL,
     "features_oracle": FEATURES_ORACLE,
     "features_oracle_full": FEATURES_ORACLE_FULL,
@@ -462,7 +435,9 @@ feature_spec = {
         "Sim2Real features are deployable and do not use privileged latent physics.",
         "Oracle features include true latent physics exported from Phase 4.",
         "All dynamic features are shifted to t-1 to avoid leakage.",
-        "diffusion_proxy is a coarse-grained observable proxy, not a strict Laplacian."
+        "diffusion_proxy is a coarse-grained observable proxy, not a strict Laplacian.",
+        "demand_real_t_1 is in HKD units (bookings × demand_to_hkd from Phase 1).",
+        "All latent force columns (diffusion, reaction, bounds, noise) are in HKD/step.",
     ],
 }
 
